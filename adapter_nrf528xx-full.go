@@ -17,13 +17,69 @@ import (
 	"unsafe"
 )
 
+func dumpEvent(id uint16) {
+	if id >= C.BLE_GAP_EVT_BASE && id <= C.BLE_GAP_EVT_LAST {
+		switch id {
+		case C.BLE_GAP_EVT_CONNECTED:
+			println("ev: BLE_GAP_EVT_CONNECTED")
+		case C.BLE_GAP_EVT_DISCONNECTED:
+			println("ev: BLE_GAP_EVT_DISCONNECTED")
+		case C.BLE_GAP_EVT_CONN_PARAM_UPDATE:
+			println("ev: BLE_GAP_EVT_CONN_PARAM_UPDATE")
+		case C.BLE_GAP_EVT_SEC_PARAMS_REQUEST:
+			println("ev: BLE_GAP_EVT_SEC_PARAMS_REQUEST")
+		case C.BLE_GAP_EVT_SEC_INFO_REQUEST:
+			println("ev: BLE_GAP_EVT_SEC_INFO_REQUEST")
+		case C.BLE_GAP_EVT_PASSKEY_DISPLAY:
+			println("ev: BLE_GAP_EVT_PASSKEY_DISPLAY")
+		case C.BLE_GAP_EVT_KEY_PRESSED:
+			println("ev: BLE_GAP_EVT_KEY_PRESSED")
+		case C.BLE_GAP_EVT_AUTH_KEY_REQUEST:
+			println("ev: BLE_GAP_EVT_AUTH_KEY_REQUEST")
+		case C.BLE_GAP_EVT_LESC_DHKEY_REQUEST:
+			println("ev: BLE_GAP_EVT_LESC_DHKEY_REQUEST")
+		case C.BLE_GAP_EVT_AUTH_STATUS:
+			println("ev: BLE_GAP_EVT_AUTH_STATUS")
+		case C.BLE_GAP_EVT_CONN_SEC_UPDATE:
+			println("ev: BLE_GAP_EVT_CONN_SEC_UPDATE")
+		case C.BLE_GAP_EVT_TIMEOUT:
+			println("ev: BLE_GAP_EVT_TIMEOUT")
+		case C.BLE_GAP_EVT_RSSI_CHANGED:
+			println("ev: BLE_GAP_EVT_RSSI_CHANGED")
+		case C.BLE_GAP_EVT_ADV_REPORT:
+			println("ev: BLE_GAP_EVT_ADV_REPORT")
+		case C.BLE_GAP_EVT_SEC_REQUEST:
+			println("ev: BLE_GAP_EVT_SEC_REQUEST")
+		case C.BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST:
+			println("ev: BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST")
+		case C.BLE_GAP_EVT_SCAN_REQ_REPORT:
+			println("ev: BLE_GAP_EVT_SCAN_REQ_REPORT")
+		case C.BLE_GAP_EVT_PHY_UPDATE_REQUEST:
+			println("ev: BLE_GAP_EVT_PHY_UPDATE_REQUEST")
+		case C.BLE_GAP_EVT_PHY_UPDATE:
+			println("ev: BLE_GAP_EVT_PHY_UPDATE")
+		case C.BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST:
+			println("ev: BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST")
+		case C.BLE_GAP_EVT_DATA_LENGTH_UPDATE:
+			println("ev: BLE_GAP_EVT_DATA_LENGTH_UPDATE")
+		case C.BLE_GAP_EVT_QOS_CHANNEL_SURVEY_REPORT:
+			println("ev: BLE_GAP_EVT_QOS_CHANNEL_SURVEY_REPORT")
+		case C.BLE_GAP_EVT_ADV_SET_TERMINATED:
+			println("ev: BLE_GAP_EVT_ADV_SET_TERMINATED")
+		default:
+			println("ev: unknown:", id)
+		}
+	}
+}
+
 func handleEvent() {
 	id := eventBuf.header.evt_id
+	dumpEvent(id)
 	switch {
 	case id >= C.BLE_GAP_EVT_BASE && id <= C.BLE_GAP_EVT_LAST:
 		gapEvent := eventBuf.evt.unionfield_gap_evt()
 		switch id {
-		case C.BLE_GAP_EVT_CONNECTED:
+		case C.BLE_GAP_EVT_CONNECTED: // 16
 			connectEvent := gapEvent.params.unionfield_connected()
 			switch connectEvent.role {
 			case C.BLE_GAP_ROLE_PERIPH:
@@ -40,7 +96,7 @@ func handleEvent() {
 				connectionAttempt.state.Set(2) // connection was successful
 				DefaultAdapter.connectHandler(Address{}, true)
 			}
-		case C.BLE_GAP_EVT_DISCONNECTED:
+		case C.BLE_GAP_EVT_DISCONNECTED: // 17
 			if debug {
 				println("evt: disconnected")
 			}
