@@ -48,7 +48,8 @@ type Adapter struct {
 	scanning          bool
 	charWriteHandlers []charWriteHandler
 
-	connectHandler func(device Device, connected bool)
+	connectHandler     func(device Device, connected bool)
+	lescRequestHandler func(pubKey []uint8)
 }
 
 // DefaultAdapter is the default adapter on the current system. On Nordic chips,
@@ -58,7 +59,11 @@ type Adapter struct {
 var DefaultAdapter = &Adapter{isDefault: true,
 	connectHandler: func(device Device, connected bool) {
 		return
-	}}
+	},
+	lescRequestHandler: func(pubKey []uint8) {
+		return
+	},
+}
 
 var eventBufLen C.uint16_t
 
