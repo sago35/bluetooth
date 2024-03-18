@@ -140,6 +140,9 @@ func handleEvent() {
 			}
 			// would assume this depends on the role,
 			// as for central we need to call sd_ble_gap_authenticate after connection esteblished instead
+
+			// in general key can be null, i would assume in our case we need to read it from flash here
+			// so we we do not reapprove bonding
 			errCode := C.sd_ble_gap_sec_params_reply(gapEvent.conn_handle, C.BLE_GAP_SEC_STATUS_SUCCESS, &secParams, &secKeySet)
 			if errCode != 0 {
 				println("security parameters response failed:", Error(errCode).Error())
