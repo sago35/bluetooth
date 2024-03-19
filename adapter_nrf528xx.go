@@ -54,6 +54,8 @@ func SetSecParamsLesc() {
 }
 
 func SetLesPublicKey(key []uint8) {
+	var pk [C.BLE_GAP_LESC_P256_PK_LEN]uint8
+	copy(pk[:], key)
 	secKeySet.keys_peer = C.ble_gap_sec_keys_t{
 		p_pk:       &C.ble_gap_lesc_p256_pk_t{},
 		p_enc_key:  &C.ble_gap_enc_key_t{},
@@ -65,14 +67,16 @@ func SetLesPublicKey(key []uint8) {
 		p_id_key:   &C.ble_gap_id_key_t{},
 		p_sign_key: &C.ble_gap_sign_info_t{},
 		p_pk: &C.ble_gap_lesc_p256_pk_t{
-			pk: [C.BLE_GAP_LESC_P256_PK_LEN]uint8(key),
+			pk: pk,
 		},
 	}
 }
 
 func ReplyLesc(key []byte) error {
+	var k [C.BLE_GAP_LESC_DHKEY_LEN]uint8
+	copy(k[:], key)
 	lescKey := C.ble_gap_lesc_dhkey_t{
-		key: [C.BLE_GAP_LESC_DHKEY_LEN]uint8(key),
+		key: k,
 	}
 	errCode := C.sd_ble_gap_lesc_dhkey_reply(currentConnection.Reg, &lescKey)
 	if errCode != 0 {
