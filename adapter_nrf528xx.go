@@ -78,7 +78,7 @@ func ReplyLesc(key []byte) error {
 	lescKey := C.ble_gap_lesc_dhkey_t{
 		key: k,
 	}
-	errCode := C.sd_ble_gap_lesc_dhkey_reply(currentConnection.Reg, &lescKey)
+	errCode := C.sd_ble_gap_lesc_dhkey_reply(currentConnection.handle.Reg, &lescKey)
 	if errCode != 0 {
 		return Error(errCode)
 

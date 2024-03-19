@@ -171,8 +171,6 @@ func handleEvent() {
 		case C.BLE_GAP_EVT_PHY_UPDATE_REQUEST:
 			phyUpdateRequest := gapEvent.params.unionfield_phy_update_request()
 			C.sd_ble_gap_phy_update(gapEvent.conn_handle, &phyUpdateRequest.peer_preferred_phys)
-		case C.BLE_GAP_EVT_CONN_PARAM_UPDATE:
-			// just update on some settings, ignore it
 		case C.BLE_GAP_EVT_CONN_SEC_UPDATE:
 			if debug {
 				println("evt: connection security update")
