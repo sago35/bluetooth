@@ -17,13 +17,69 @@ import (
 	"unsafe"
 )
 
+func dumpEvent(id uint16) {
+	if id >= C.BLE_GAP_EVT_BASE && id <= C.BLE_GAP_EVT_LAST {
+		switch id {
+		case C.BLE_GAP_EVT_CONNECTED:
+			println("ev: BLE_GAP_EVT_CONNECTED")
+		case C.BLE_GAP_EVT_DISCONNECTED:
+			println("ev: BLE_GAP_EVT_DISCONNECTED")
+		case C.BLE_GAP_EVT_CONN_PARAM_UPDATE:
+			println("ev: BLE_GAP_EVT_CONN_PARAM_UPDATE")
+		case C.BLE_GAP_EVT_SEC_PARAMS_REQUEST:
+			println("ev: BLE_GAP_EVT_SEC_PARAMS_REQUEST")
+		case C.BLE_GAP_EVT_SEC_INFO_REQUEST:
+			println("ev: BLE_GAP_EVT_SEC_INFO_REQUEST")
+		case C.BLE_GAP_EVT_PASSKEY_DISPLAY:
+			println("ev: BLE_GAP_EVT_PASSKEY_DISPLAY")
+		case C.BLE_GAP_EVT_KEY_PRESSED:
+			println("ev: BLE_GAP_EVT_KEY_PRESSED")
+		case C.BLE_GAP_EVT_AUTH_KEY_REQUEST:
+			println("ev: BLE_GAP_EVT_AUTH_KEY_REQUEST")
+		case C.BLE_GAP_EVT_LESC_DHKEY_REQUEST:
+			println("ev: BLE_GAP_EVT_LESC_DHKEY_REQUEST")
+		case C.BLE_GAP_EVT_AUTH_STATUS:
+			println("ev: BLE_GAP_EVT_AUTH_STATUS")
+		case C.BLE_GAP_EVT_CONN_SEC_UPDATE:
+			println("ev: BLE_GAP_EVT_CONN_SEC_UPDATE")
+		case C.BLE_GAP_EVT_TIMEOUT:
+			println("ev: BLE_GAP_EVT_TIMEOUT")
+		case C.BLE_GAP_EVT_RSSI_CHANGED:
+			println("ev: BLE_GAP_EVT_RSSI_CHANGED")
+		case C.BLE_GAP_EVT_ADV_REPORT:
+			println("ev: BLE_GAP_EVT_ADV_REPORT")
+		case C.BLE_GAP_EVT_SEC_REQUEST:
+			println("ev: BLE_GAP_EVT_SEC_REQUEST")
+		case C.BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST:
+			println("ev: BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST")
+		case C.BLE_GAP_EVT_SCAN_REQ_REPORT:
+			println("ev: BLE_GAP_EVT_SCAN_REQ_REPORT")
+		case C.BLE_GAP_EVT_PHY_UPDATE_REQUEST:
+			println("ev: BLE_GAP_EVT_PHY_UPDATE_REQUEST")
+		case C.BLE_GAP_EVT_PHY_UPDATE:
+			println("ev: BLE_GAP_EVT_PHY_UPDATE")
+		case C.BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST:
+			println("ev: BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST")
+		case C.BLE_GAP_EVT_DATA_LENGTH_UPDATE:
+			println("ev: BLE_GAP_EVT_DATA_LENGTH_UPDATE")
+		case C.BLE_GAP_EVT_QOS_CHANNEL_SURVEY_REPORT:
+			println("ev: BLE_GAP_EVT_QOS_CHANNEL_SURVEY_REPORT")
+		case C.BLE_GAP_EVT_ADV_SET_TERMINATED:
+			println("ev: BLE_GAP_EVT_ADV_SET_TERMINATED")
+		default:
+			println("ev: unknown:", id)
+		}
+	}
+}
+
 func handleEvent() {
 	id := eventBuf.header.evt_id
+	dumpEvent(id)
 	switch {
 	case id >= C.BLE_GAP_EVT_BASE && id <= C.BLE_GAP_EVT_LAST:
 		gapEvent := eventBuf.evt.unionfield_gap_evt()
 		switch id {
-		case C.BLE_GAP_EVT_CONNECTED:
+		case C.BLE_GAP_EVT_CONNECTED: // 16
 			connectEvent := gapEvent.params.unionfield_connected()
 			device := Device{
 				Address:          Address{makeMACAddress(connectEvent.peer_addr)},
@@ -44,9 +100,11 @@ func handleEvent() {
 				connectionAttempt.state.Set(2) // connection was successful
 				DefaultAdapter.connectHandler(device, true)
 			}
-		case C.BLE_GAP_EVT_DISCONNECTED:
+		case C.BLE_GAP_EVT_DISCONNECTED: // 17
 			if debug {
-				println("evt: disconnected")
+				disconn := gapEvent.params.unionfield_disconnected()
+				println("evt: disconnected with reason:", disconn.reason)
+
 			}
 			// Clean up state for this connection.
 			for i, cb := range gattcNotificationCallbacks {
@@ -113,6 +171,80 @@ func handleEvent() {
 		case C.BLE_GAP_EVT_PHY_UPDATE_REQUEST:
 			phyUpdateRequest := gapEvent.params.unionfield_phy_update_request()
 			C.sd_ble_gap_phy_update(gapEvent.conn_handle, &phyUpdateRequest.peer_preferred_phys)
+		case C.BLE_GAP_EVT_CONN_SEC_UPDATE:
+			if debug {
+				println("evt: connection security update")
+			}
+		case C.BLE_GAP_EVT_SEC_INFO_REQUEST:
+			if debug {
+				println("evt: sec info request")
+			}
+
+			secInfo := gapEvent.params.unionfield_sec_info_request()
+			var errCode uint32
+			if secInfo.master_id.ediv == secKeySet.keys_peer.p_enc_key.master_id.ediv {
+				println("evid match")
+				secKeySet.keys_peer.p_enc_key.enc_info.set_bitfield_lesc(1)
+				errCode = C.sd_ble_gap_sec_info_reply(gapEvent.conn_handle, &secKeySet.keys_peer.p_enc_key.enc_info,
+					&secKeySet.keys_peer.p_id_key.id_info, nil) //secKeySet.keys_own
+			} else {
+				println("evid no match")
+				errCode = C.sd_ble_gap_sec_info_reply(gapEvent.conn_handle, nil,
+					&secKeySet.keys_peer.p_id_key.id_info, nil)
+			}
+			if errCode != 0 {
+				println("security info request failed:", Error(errCode).Error())
+				return
+			}
+			println("security info request succeesess")
+
+		case C.BLE_GAP_EVT_AUTH_STATUS:
+			// here we get auth response
+			if debug {
+				authStatus := gapEvent.params.unionfield_auth_status()
+				if authStatus.auth_status != C.BLE_GAP_SEC_STATUS_SUCCESS {
+					if authStatus.bitfield_error_src() == C.BLE_GAP_SEC_STATUS_SOURCE_LOCAL {
+						println("auth failed from local source")
+					} else {
+						println("auth failed from remote source")
+					}
+					println("auth status failed with status:", authStatus.auth_status)
+					break
+				}
+				if authStatus.bitfield_bonded() == 1 {
+					println("auth status is bonded")
+				}
+				if authStatus.bitfield_lesc() == 1 {
+					println("connection is LE secure")
+				}
+				if authStatus.kdist_own.bitfield_enc() != 0 {
+					println("local peer distributed encription keys")
+				}
+				if authStatus.kdist_own.bitfield_id() != 0 {
+					println("local peer distributed id keys")
+				}
+				if authStatus.kdist_own.bitfield_sign() != 0 {
+					println("local peer distributed sign keys")
+				}
+				if authStatus.kdist_own.bitfield_link() != 0 {
+					println("local peer distributed link keys")
+				}
+
+				if authStatus.kdist_peer.bitfield_enc() != 0 {
+					println("remote peer distributed encription keys")
+				}
+				if authStatus.kdist_peer.bitfield_id() != 0 {
+					println("remote peer distributed id keys")
+				}
+				if authStatus.kdist_peer.bitfield_sign() != 0 {
+					println("remote peer distributed sign keys")
+				}
+				if authStatus.kdist_peer.bitfield_link() != 0 {
+					println("remote peer distributed link keys")
+				}
+			}
+
+			// TODO: save keys to flash for pairing/bonding
 		case C.BLE_GAP_EVT_PHY_UPDATE:
 			// ignore confirmation of phy successfully updated
 		case C.BLE_GAP_EVT_TIMEOUT:
@@ -130,9 +262,36 @@ func handleEvent() {
 					println("gap timeout: other")
 				}
 			}
+		// ignore confirmation of phy successfully updated
+		case C.BLE_GAP_EVT_SEC_PARAMS_REQUEST:
+			if debug {
+				println("evt: security parameters request")
+			}
+			// would assume this depends on the role,
+			// as for central we need to call sd_ble_gap_authenticate after connection esteblished instead
+
+			// in general key can be null, i would assume in our case we need to read it from flash here
+			// so we we do not reapprove bonding
+			errCode := C.sd_ble_gap_sec_params_reply(gapEvent.conn_handle, C.BLE_GAP_SEC_STATUS_SUCCESS, &secParams, &secKeySet)
+			if errCode != 0 {
+				println("security parameters response failed:", Error(errCode).Error())
+				return
+			}
+			if debug {
+				println("successfully established security parameters exchange")
+			}
+
+		case C.BLE_GAP_EVT_LESC_DHKEY_REQUEST:
+			if debug {
+				println("evt: lesc dhkey request")
+			}
+			//	lesc_request := gapEvent.params.unionfield_lesc_dhkey_request()
+			//DefaultAdapter.lescRequestHandler(lesc_request.p_pk_peer.pk[:])
+			DefaultAdapter.lescRequestHandler(secKeySet.keys_peer.p_pk.pk[:])
+
 		default:
 			if debug {
-				println("unknown GAP event:", id)
+				println("unknown GAP event:", id-C.BLE_GAP_EVT_BASE)
 			}
 		}
 	case id >= C.BLE_GATTS_EVT_BASE && id <= C.BLE_GATTS_EVT_LAST:
