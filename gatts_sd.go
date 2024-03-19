@@ -63,7 +63,7 @@ func (a *Adapter) AddService(service *Service) error {
 			},
 			init_len:  C.uint16_t(len(char.Value)),
 			init_offs: 0,
-			max_len:   20, // This is a conservative maximum length.
+			max_len:   100, // This is a conservative maximum length.
 		}
 		if len(char.Value) != 0 {
 			value.p_value = (*C.uint8_t)(unsafe.Pointer(&char.Value[0]))
