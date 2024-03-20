@@ -18,6 +18,9 @@ import (
 )
 
 func dumpEvent(id uint16) {
+	print("dumpEvent(")
+	print(id)
+	print(") ")
 	if id >= C.BLE_GAP_EVT_BASE && id <= C.BLE_GAP_EVT_LAST {
 		switch id {
 		case C.BLE_GAP_EVT_CONNECTED:
@@ -67,8 +70,83 @@ func dumpEvent(id uint16) {
 		case C.BLE_GAP_EVT_ADV_SET_TERMINATED:
 			println("ev: BLE_GAP_EVT_ADV_SET_TERMINATED")
 		default:
-			println("ev: unknown:", id)
+			println("ev: unknown gap:", id)
 		}
+	} else if id >= C.BLE_GATTC_EVT_BASE && id <= C.BLE_GATTC_EVT_LAST {
+		switch id {
+		case C.BLE_GATTC_EVT_PRIM_SRVC_DISC_RSP:
+			println("ev: BLE_GATTC_EVT_PRIM_SRVC_DISC_RSP")
+		case C.BLE_GATTC_EVT_REL_DISC_RSP:
+			println("ev: BLE_GATTC_EVT_REL_DISC_RSP")
+		case C.BLE_GATTC_EVT_CHAR_DISC_RSP:
+			println("ev: BLE_GATTC_EVT_CHAR_DISC_RSP")
+		case C.BLE_GATTC_EVT_DESC_DISC_RSP:
+			println("ev: BLE_GATTC_EVT_DESC_DISC_RSP")
+		case C.BLE_GATTC_EVT_ATTR_INFO_DISC_RSP:
+			println("ev: BLE_GATTC_EVT_ATTR_INFO_DISC_RSP")
+		case C.BLE_GATTC_EVT_CHAR_VAL_BY_UUID_READ_RSP:
+			println("ev: BLE_GATTC_EVT_CHAR_VAL_BY_UUID_READ_RSP")
+		case C.BLE_GATTC_EVT_READ_RSP:
+			println("ev: BLE_GATTC_EVT_READ_RSP")
+		case C.BLE_GATTC_EVT_CHAR_VALS_READ_RSP:
+			println("ev: BLE_GATTC_EVT_CHAR_VALS_READ_RSP")
+		case C.BLE_GATTC_EVT_WRITE_RSP:
+			println("ev: BLE_GATTC_EVT_WRITE_RSP")
+		case C.BLE_GATTC_EVT_HVX:
+			println("ev: BLE_GATTC_EVT_HVX")
+		case C.BLE_GATTC_EVT_EXCHANGE_MTU_RSP:
+			println("ev: BLE_GATTC_EVT_EXCHANGE_MTU_RSP")
+		case C.BLE_GATTC_EVT_TIMEOUT:
+			println("ev: BLE_GATTC_EVT_TIMEOUT")
+		case C.BLE_GATTC_EVT_WRITE_CMD_TX_COMPLETE:
+			println("ev: BLE_GATTC_EVT_WRITE_CMD_TX_COMPLETE")
+		default:
+			println("ev: unknown gattc:", id)
+		}
+	} else if id >= C.BLE_GATTS_EVT_BASE && id <= C.BLE_GATTS_EVT_LAST {
+		switch id {
+		case C.BLE_GATTS_EVT_WRITE:
+			println("ev: BLE_GATTS_EVT_WRITE")
+		case C.BLE_GATTS_EVT_RW_AUTHORIZE_REQUEST:
+			println("ev: BLE_GATTS_EVT_RW_AUTHORIZE_REQUEST")
+		case C.BLE_GATTS_EVT_SYS_ATTR_MISSING:
+			println("ev: BLE_GATTS_EVT_SYS_ATTR_MISSING")
+		case C.BLE_GATTS_EVT_HVC:
+			println("ev: BLE_GATTS_EVT_HVC")
+		case C.BLE_GATTS_EVT_SC_CONFIRM:
+			println("ev: BLE_GATTS_EVT_SC_CONFIRM")
+		case C.BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST:
+			println("ev: BLE_GATTS_EVT_EXCHANGE_MTU_REQUEST")
+		case C.BLE_GATTS_EVT_TIMEOUT:
+			println("ev: BLE_GATTS_EVT_TIMEOUT")
+		case C.BLE_GATTS_EVT_HVN_TX_COMPLETE:
+			println("ev: BLE_GATTS_EVT_HVN_TX_COMPLETE")
+		default:
+			println("ev: unknown gatts:", id)
+		}
+	} else if id >= C.BLE_L2CAP_EVT_BASE && id <= C.BLE_L2CAP_EVT_LAST {
+		switch id {
+		case C.BLE_L2CAP_EVT_CH_SETUP_REQUEST:
+			println("ev: BLE_L2CAP_EVT_CH_SETUP_REQUEST")
+		case C.BLE_L2CAP_EVT_CH_SETUP_REFUSED:
+			println("ev: BLE_L2CAP_EVT_CH_SETUP_REFUSE")
+		case C.BLE_L2CAP_EVT_CH_SETUP:
+			println("ev: BLE_L2CAP_EVT_CH_SETU")
+		case C.BLE_L2CAP_EVT_CH_RELEASED:
+			println("ev: BLE_L2CAP_EVT_CH_RELEASE")
+		case C.BLE_L2CAP_EVT_CH_SDU_BUF_RELEASED:
+			println("ev: BLE_L2CAP_EVT_CH_SDU_BUF_RELEASE")
+		case C.BLE_L2CAP_EVT_CH_CREDIT:
+			println("ev: BLE_L2CAP_EVT_CH_CREDI")
+		case C.BLE_L2CAP_EVT_CH_RX:
+			println("ev: BLE_L2CAP_EVT_CH_R")
+		case C.BLE_L2CAP_EVT_CH_TX:
+			println("ev: BLE_L2CAP_EVT_CH_T")
+		default:
+			println("ev: unknown l2cap:", id)
+		}
+	} else {
+		println("")
 	}
 }
 
@@ -165,9 +243,12 @@ func handleEvent() {
 		case C.BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST:
 			// We need to respond with sd_ble_gap_data_length_update. Setting
 			// both parameters to nil will make sure we send the default values.
-			C.sd_ble_gap_data_length_update(gapEvent.conn_handle, nil, nil)
+			params := gapEvent.params.unionfield_data_length_update_request().peer_params
+			C.sd_ble_gap_data_length_update(gapEvent.conn_handle, &params, nil)
 		case C.BLE_GAP_EVT_DATA_LENGTH_UPDATE:
 			// ignore confirmation of data length successfully updated
+			params := gapEvent.params.unionfield_data_length_update().effective_params
+			println("BLE_GAP_EVT_DATA_LENGTH_UPDATE :", params.max_tx_octets, params.max_rx_octets, params.max_tx_time_us, params.max_rx_time_us)
 		case C.BLE_GAP_EVT_PHY_UPDATE_REQUEST:
 			phyUpdateRequest := gapEvent.params.unionfield_phy_update_request()
 			C.sd_ble_gap_phy_update(gapEvent.conn_handle, &phyUpdateRequest.peer_preferred_phys)
@@ -202,6 +283,26 @@ func handleEvent() {
 			// here we get auth response
 			if debug {
 				authStatus := gapEvent.params.unionfield_auth_status()
+				println("auth_status :",
+					authStatus.auth_status,
+					authStatus.bitfield_error_src(),
+					authStatus.bitfield_bonded(),
+					authStatus.bitfield_lesc(),
+					authStatus.sm1_levels.bitfield_lv1(),
+					authStatus.sm1_levels.bitfield_lv2(),
+					authStatus.sm1_levels.bitfield_lv3(),
+					authStatus.sm2_levels.bitfield_lv1(),
+					authStatus.sm2_levels.bitfield_lv2(),
+					authStatus.sm2_levels.bitfield_lv3(),
+					authStatus.kdist_own.bitfield_enc(),
+					authStatus.kdist_own.bitfield_id(),
+					authStatus.kdist_own.bitfield_sign(),
+					authStatus.kdist_own.bitfield_link(),
+					authStatus.kdist_peer.bitfield_enc(),
+					authStatus.kdist_peer.bitfield_id(),
+					authStatus.kdist_peer.bitfield_sign(),
+					authStatus.kdist_peer.bitfield_link(),
+				)
 				if authStatus.auth_status != C.BLE_GAP_SEC_STATUS_SUCCESS {
 					if authStatus.bitfield_error_src() == C.BLE_GAP_SEC_STATUS_SOURCE_LOCAL {
 						println("auth failed from local source")
@@ -269,9 +370,30 @@ func handleEvent() {
 			}
 			// would assume this depends on the role,
 			// as for central we need to call sd_ble_gap_authenticate after connection esteblished instead
+			params := gapEvent.params.unionfield_sec_params_request().peer_params
+			println("bond", params.bitfield_bond())
+			println("mitm", params.bitfield_mitm())
+			println("lesc", params.bitfield_lesc())
+			println("keypress", params.bitfield_keypress())
+			println("io_caps", params.bitfield_io_caps())
+			println("oob", params.bitfield_oob())
+			println("min_ks", params.min_key_size)
+			println("max_ks", params.max_key_size)
 
 			// in general key can be null, i would assume in our case we need to read it from flash here
 			// so we we do not reapprove bonding
+			//secParams.set_bitfield_bond(1)
+			//secParams.set_bitfield_mitm(1)
+			//secParams.set_bitfield_lesc(1)
+			//secParams.set_bitfield_io_caps(uint8(4))
+			// /**@defgroup BLE_GAP_IO_CAPS GAP IO Capabilities
+			//  * @{ */
+			// #define BLE_GAP_IO_CAPS_DISPLAY_ONLY      0x00   /**< Display Only. */
+			// #define BLE_GAP_IO_CAPS_DISPLAY_YESNO     0x01   /**< Display and Yes/No entry. */
+			// #define BLE_GAP_IO_CAPS_KEYBOARD_ONLY     0x02   /**< Keyboard Only. */
+			// #define BLE_GAP_IO_CAPS_NONE              0x03   /**< No I/O capabilities. */
+			// #define BLE_GAP_IO_CAPS_KEYBOARD_DISPLAY  0x04   /**< Keyboard and Display. */
+			// /**@} */
 			errCode := C.sd_ble_gap_sec_params_reply(gapEvent.conn_handle, C.BLE_GAP_SEC_STATUS_SUCCESS, &secParams, &secKeySet)
 			if errCode != 0 {
 				println("security parameters response failed:", Error(errCode).Error())
