@@ -11,6 +11,11 @@ package bluetooth
 #include "ble_gap.h"
 
 void assertHandler(void);
+
+ble_gap_sec_params_t secParamsX = {
+    .min_key_size = 7,
+    .max_key_size = 16,
+};
 */
 import "C"
 
@@ -37,6 +42,7 @@ var (
 		min_key_size: 7, // not sure if those are the best default length
 		max_key_size: 16,
 	}
+	secParamsX = C.secParamsX
 
 	secKeySet C.ble_gap_sec_keyset_t
 )
@@ -51,6 +57,27 @@ func SetSecParamsLesc() {
 	secParams.set_bitfield_lesc(1)
 	//secParams.set_bitfield_mitm(1)
 	//secParams.set_bitfield_io_caps(uint8(DisplayOnlyGapIOCapability))
+}
+
+func SetSecParamsLesc2() {
+	secParams = secParamsX
+	//secParams.set_bitfield_bond(1) //1)
+	//secParams.set_bitfield_lesc(1)
+	//secParams.set_bitfield_mitm(1)
+	//secParams.set_bitfield_io_caps(2) // 3: NONE
+}
+
+func SetSecParamsLesc3() {
+	secParams.set_bitfield_bond(1) //1)
+	secParams.set_bitfield_mitm(1)
+	secParams.set_bitfield_lesc(1)
+	secParams.set_bitfield_keypress(0)
+	//secParams.set_bitfield_io_caps(DisplayOnlyGapIOCapability) // Android 側で数字入力する必要あり (その数字は？
+	//secParams.set_bitfield_io_caps(DisplayYesNoGapIOCapability)
+	//secParams.set_bitfield_io_caps(KeyboardOnlyGapIOCapability)
+	secParams.set_bitfield_io_caps(NoneGapIOCapability)
+	//secParams.set_bitfield_io_caps(KeyboardDisplayGapIOCapability) // Android に表示された数字をキー入力する必要あり
+	secParams.set_bitfield_oob(1)
 }
 
 func SetLesPublicKey(key []uint8) {

@@ -244,7 +244,8 @@ func handleEvent() {
 			// We need to respond with sd_ble_gap_data_length_update. Setting
 			// both parameters to nil will make sure we send the default values.
 			params := gapEvent.params.unionfield_data_length_update_request().peer_params
-			C.sd_ble_gap_data_length_update(gapEvent.conn_handle, &params, nil)
+			_ = params
+			C.sd_ble_gap_data_length_update(gapEvent.conn_handle, nil, nil)
 		case C.BLE_GAP_EVT_DATA_LENGTH_UPDATE:
 			// ignore confirmation of data length successfully updated
 			params := gapEvent.params.unionfield_data_length_update().effective_params
@@ -278,7 +279,10 @@ func handleEvent() {
 				return
 			}
 			println("security info request succeesess")
-
+		case C.BLE_GAP_EVT_PASSKEY_DISPLAY:
+			params := gapEvent.params.unionfield_passkey_display()
+			data := (*[6]byte)(unsafe.Pointer(&params.passkey[0]))[:6:6]
+			println(string(data))
 		case C.BLE_GAP_EVT_AUTH_STATUS:
 			// here we get auth response
 			if debug {
@@ -382,6 +386,17 @@ func handleEvent() {
 
 			// in general key can be null, i would assume in our case we need to read it from flash here
 			// so we we do not reapprove bonding
+			//SetSecParamsLesc2()
+			//SetSecParamsLesc3()
+			println("---")
+			println("bond", secParams.bitfield_bond())
+			println("mitm", secParams.bitfield_mitm())
+			println("lesc", secParams.bitfield_lesc())
+			println("keypress", secParams.bitfield_keypress())
+			println("io_caps", secParams.bitfield_io_caps())
+			println("oob", secParams.bitfield_oob())
+			println("min_ks", secParams.min_key_size)
+			println("max_ks", secParams.max_key_size)
 			//secParams.set_bitfield_bond(1)
 			//secParams.set_bitfield_mitm(1)
 			//secParams.set_bitfield_lesc(1)
@@ -396,7 +411,7 @@ func handleEvent() {
 			// /**@} */
 			errCode := C.sd_ble_gap_sec_params_reply(gapEvent.conn_handle, C.BLE_GAP_SEC_STATUS_SUCCESS, &secParams, &secKeySet)
 			if errCode != 0 {
-				println("security parameters response failed:", Error(errCode).Error())
+				println("security parameters response failed:", Error(errCode).Error(), errCode)
 				return
 			}
 			if debug {
@@ -413,7 +428,7 @@ func handleEvent() {
 
 		default:
 			if debug {
-				println("unknown GAP event:", id-C.BLE_GAP_EVT_BASE)
+				println("unknown GAP event:", id, id-C.BLE_GAP_EVT_BASE)
 			}
 		}
 	case id >= C.BLE_GATTS_EVT_BASE && id <= C.BLE_GATTS_EVT_LAST:
@@ -423,6 +438,13 @@ func handleEvent() {
 			writeEvent := gattsEvent.params.unionfield_write()
 			len := writeEvent.len - writeEvent.offset
 			data := (*[255]byte)(unsafe.Pointer(&writeEvent.data[0]))[:len:len]
+			for i, x := range data {
+				if i > 0 {
+					print(",")
+				}
+				print(x)
+			}
+			println()
 			handler := DefaultAdapter.getCharWriteHandler(writeEvent.handle)
 			if handler != nil {
 				handler.callback(Connection(gattsEvent.conn_handle), int(writeEvent.offset), data)
