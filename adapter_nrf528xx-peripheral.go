@@ -28,6 +28,7 @@ func handleEvent() {
 				println("evt: connected in peripheral role")
 			}
 			secOnConnect()
+			secOnConnectPeripheral(gapEvent.conn_handle)
 			currentConnection.handle.Reg = uint16(gapEvent.conn_handle)
 			connectEvent := gapEvent.params.unionfield_connected()
 			device := Device{

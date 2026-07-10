@@ -34,6 +34,10 @@ const (
 	flagSecInfoRequest
 )
 
+// idleAuthTimeout is how long a connected central has to encrypt the link
+// (by pairing or by resuming a bond) before it is disconnected.
+const idleAuthTimeout = 10 * time.Second
+
 // Static buffers for the pairing procedure. The SoftDevice requires the
 // keyset memory to stay valid until the BLE_GAP_EVT_AUTH_STATUS event, so
 // package-level variables are used. This limits pairing to one procedure at a
@@ -95,6 +99,14 @@ var (
 	sysAttrBuf [64]C.uint8_t
 	sysAttrLen volatile.Register16
 	peerBonded volatile.Register8
+
+	// connPending is set while a central is connected but has not yet
+	// encrypted the link (by pairing or by resuming a bond). The security
+	// worker disconnects it if this takes longer than idleAuthTimeout, so a
+	// central that never attempts to pair cannot occupy the single
+	// connection slot forever and lock out the bonded central.
+	connPending       volatile.Register8
+	pendingConnHandle = volatileHandle{handle: volatile.Register16{C.BLE_CONN_HANDLE_INVALID}}
 	// bondDirty is set (from interrupt context) whenever the RAM copy of the
 	// bond (sys attrs) changes and needs to be written back to flash. It is
 	// consumed by the bond storage worker: flash writes block for tens of
@@ -335,6 +347,17 @@ func secOnConnect() {
 	peerBonded.Set(0)
 }
 
+// secOnConnectPeripheral additionally starts the idle-auth disconnect timer
+// (see connPending). Bonding is a peripheral-side concept in this library, so
+// this must only be called for a connection where this device is the
+// peripheral, not for an outgoing central-role connection.
+func secOnConnectPeripheral(connHandle C.uint16_t) {
+	if pairingEnabled.Get() != 0 {
+		pendingConnHandle.Set(connHandle)
+		connPending.Set(1)
+	}
+}
+
 // secSaveSysAttrs saves the CCCD state of the bonded central so it can be
 // restored when it reconnects. It is called on every GATT server write (which
 // includes subscription changes) and at disconnect.
@@ -358,6 +381,7 @@ func secSaveSysAttrs(connHandle C.uint16_t) {
 
 func secOnDisconnect(connHandle C.uint16_t) {
 	secSaveSysAttrs(connHandle)
+	connPending.Set(0)
 }
 
 // secRestoreSysAttrs restores the saved CCCD state of the bonded central, and
@@ -379,6 +403,9 @@ func secRestoreSysAttrs(connHandle C.uint16_t) bool {
 // for a BLE_GATTS_EVT_SYS_ATTR_MISSING event is not enough (sending a
 // notification does not generate that event, it just fails).
 func secOnConnSecUpdate(connHandle C.uint16_t) {
+	// The link is now encrypted, one way or another: cancel the idle-auth
+	// disconnect timer.
+	connPending.Set(0)
 	secRestoreSysAttrs(connHandle)
 }
 
@@ -464,10 +491,25 @@ func secOnAuthStatus(connHandle C.uint16_t, evt *C.ble_gap_evt_auth_status_t) {
 // LESC DHKey computation is too slow for an interrupt handler, and callbacks
 // may block on user input.
 func securityWorker() {
+	const pollInterval = 16 * time.Millisecond
+	var pendingElapsed time.Duration
 	for {
 		flags := secEventFlags.Get()
 		if flags == 0 {
-			time.Sleep(16 * time.Millisecond)
+			if connPending.Get() == 0 {
+				pendingElapsed = 0
+			} else {
+				pendingElapsed += pollInterval
+				if pendingElapsed >= idleAuthTimeout {
+					pendingElapsed = 0
+					connPending.Set(0)
+					if debug {
+						println("disconnecting: link was never encrypted")
+					}
+					C.sd_ble_gap_disconnect(pendingConnHandle.Get(), C.BLE_HCI_LOCAL_HOST_TERMINATED_CONNECTION)
+				}
+			}
+			time.Sleep(pollInterval)
 			continue
 		}
 		connHandle := secEventConn.Get()
