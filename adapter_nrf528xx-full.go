@@ -35,6 +35,7 @@ func handleEvent() {
 				if debug {
 					println("evt: connected in peripheral role")
 				}
+				secOnConnectPeripheral(gapEvent.conn_handle)
 				currentConnection.handle.Reg = uint16(gapEvent.conn_handle)
 				DefaultAdapter.connectHandler(device, true)
 			case C.BLE_GAP_ROLE_CENTRAL:
