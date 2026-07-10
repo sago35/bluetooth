@@ -171,6 +171,11 @@ func (a *Adapter) getCharWriteHandler(handle C.uint16_t) *charWriteHandler {
 }
 
 // Write replaces the characteristic value with a new value.
+//
+// If the characteristic is notified or indicated to a connected central,
+// this may return ErrNotEnoughResources when the SoftDevice's per-connection
+// notification queue is currently full. This is transient: the queue drains
+// as connection events pass, so the caller may retry after a short wait.
 func (c *Characteristic) Write(p []byte) (n int, err error) {
 	if len(p) == 0 {
 		// Nothing to write.
