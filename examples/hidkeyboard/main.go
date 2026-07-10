@@ -8,6 +8,13 @@
 // console is sent to the host as a keystroke - useful on boards without
 // buttons wired to the pins below.
 //
+// The device only bonds with one central at a time. Once bonded, it rejects
+// pairing attempts from any other central, so a nearby device cannot take
+// over the keyboard. To pair with a new central, hold down the a and b
+// buttons during the first few seconds after powering on (or resetting) the
+// device: this opens a one-time pairing window that closes again as soon as
+// a new device has paired.
+//
 // On Windows, add the device via Settings > Bluetooth & devices. If it does
 // not show up in the scan, set "Bluetooth devices discovery" to "Advanced".
 package main
@@ -75,11 +82,21 @@ var buttons = [...]button{
 }
 
 func main() {
+	// Configure the buttons before anything else, so the pairing-mode
+	// gesture below can read them.
 	for i := range buttons {
 		buttons[i].pin.Configure(machine.PinConfig{Mode: machine.PinInputPullup})
 	}
 
+	// Holding the a and b buttons down during the first moments after
+	// power-on (or reset) is the physical gesture that authorizes pairing
+	// with a new central. The state is read after this startup delay, not
+	// before it, so there is an actual window in which to press them: a
+	// flash tool resets the board on its own, giving no way to have a finger
+	// on the buttons at the exact moment of reset.
 	time.Sleep(3 * time.Second)
+	pairingModeRequested := !buttons[0].pin.Get() && !buttons[1].pin.Get()
+
 	println("starting")
 	must("enable BLE stack", adapter.Enable())
 
@@ -95,6 +112,10 @@ func main() {
 			}
 		},
 	}))
+	if pairingModeRequested {
+		adapter.AllowNewPairing(true)
+		println("pairing mode: a new central may pair until one does")
+	}
 
 	// The device information service with the PnP ID characteristic is
 	// required by the HID over GATT profile.
