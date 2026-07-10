@@ -69,14 +69,23 @@ var (
 	secInfoMasterID C.ble_gap_master_id_t
 	secInfoEncReq   volatile.Register8
 
-	// RAM-only bond storage: the LTK from the last bonding procedure. It is
-	// lost on reset, after which the central has to delete the bond and pair
-	// again. bondValid is written by the security worker, by RemoveBond
-	// (application goroutine), and by loadBondFromFlash (called from
-	// EnablePairing), and read by the security worker, so it must be a
-	// volatile type like the other cross-context flags in this file.
+	// The LTK from the last bonding procedure, persisted to flash (see
+	// bond_storage_nrf528xx.go). bondValid reports whether it is populated.
+	// It is written by the security worker, by RemoveBond (application
+	// goroutine), and by loadBondFromFlash (called from EnablePairing), and
+	// read from interrupt context (secOnSecParamsRequest) and the security
+	// worker, so it must be a volatile type like the rest of this shared
+	// state.
 	ownEncKey C.ble_gap_enc_key_t
 	bondValid volatile.Register8
+
+	// allowNewPairing gates pairing with a central this device does not
+	// already have a bond with. It defaults to closed (0) once a bond
+	// exists, so a nearby device cannot silently take over an already-paired
+	// keyboard; the application must call Adapter.AllowNewPairing(true),
+	// typically guarded by a physical action such as a boot-time button
+	// combination. It is reset to closed again after a new bond is formed.
+	allowNewPairing volatile.Register8
 
 	// System attributes (CCCD values) of the bonded central, saved at
 	// disconnect. A bonded central expects its notification subscriptions to
@@ -176,10 +185,28 @@ func (a *Adapter) EnablePairing(params PairingParams) error {
 	return nil
 }
 
+// AllowNewPairing opens or closes the pairing window for a central this
+// device does not already have a bond with. As long as no bond exists yet,
+// pairing is always allowed and this setting has no effect. Once a bond
+// exists, new pairing attempts are rejected by default (so a nearby device
+// cannot silently take over an already-paired keyboard) until this is called
+// with true; the window closes again as soon as a new bond is formed.
+//
+// Typical usage is to gate this behind a physical action, such as a
+// particular combination of buttons held at startup.
+func (a *Adapter) AllowNewPairing(allow bool) {
+	if allow {
+		allowNewPairing.Set(1)
+	} else {
+		allowNewPairing.Set(0)
+	}
+}
+
 // RemoveBond deletes the stored bond, both the RAM copy and the flash
-// record, and disconnects the currently connected central (if any). This is
-// the "unpair" action of a typical single-bond device: the next central to
-// connect can pair fresh.
+// record, and disconnects the currently connected central (if any). The
+// previously bonded central can then no longer re-encrypt, and since no bond
+// remains, the next pairing attempt is accepted without AllowNewPairing.
+// This is the "unpair" action of a typical single-bond device.
 //
 // It must be called from goroutine context (it blocks until the flash erase
 // has completed), never from an interrupt.
@@ -365,6 +392,18 @@ func secOnSecParamsRequest(connHandle C.uint16_t) {
 	if pairingEnabled.Get() == 0 {
 		// Pairing is not configured: politely reject instead of letting the
 		// central wait for the SMP timeout.
+		if debug {
+			println("pairing rejected: pairing not enabled")
+		}
+		C.sd_ble_gap_sec_params_reply(connHandle, C.BLE_GAP_SEC_STATUS_PAIRING_NOT_SUPP, nil, nil)
+		return
+	}
+	if bondValid.Get() != 0 && allowNewPairing.Get() == 0 {
+		// Already bonded with a central and not in pairing mode: reject a
+		// new pairing attempt instead of letting a nearby device take over.
+		if debug {
+			println("pairing rejected: already bonded and pairing mode is closed")
+		}
 		C.sd_ble_gap_sec_params_reply(connHandle, C.BLE_GAP_SEC_STATUS_PAIRING_NOT_SUPP, nil, nil)
 		return
 	}
@@ -480,14 +519,16 @@ func securityWorker() {
 			}
 			if err == nil && authStatusBonded.Get() != 0 {
 				bondValid.Set(1)
-			} else {
-				bondValid.Set(0)
-			}
-			if bondValid.Get() != 0 {
 				peerBonded.Set(1)
 				// A new bond invalidates CCCD state saved for an old one.
 				sysAttrLen.Set(0)
 				bondDirty.Set(1)
+				// Close the pairing window again: it only ever admits one
+				// new bond. A failed attempt (the other branch) leaves an
+				// existing bond, and the pairing window it required, alone.
+				allowNewPairing.Set(0)
+			} else {
+				bondValid.Set(0)
 			}
 			if handler := pairingConfig.PairingCompleteHandler; handler != nil {
 				handler(device, err)
