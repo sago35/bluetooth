@@ -10,6 +10,12 @@ import "C"
 // Error is an error from within the SoftDevice.
 type Error uint32
 
+// ErrNotEnoughResources is returned by Characteristic.Write when the
+// SoftDevice notification queue for the connection is full. This is a
+// transient condition: the queue drains every connection event, so the
+// caller may retry after a short wait (for example one millisecond).
+const ErrNotEnoughResources = Error(19) // C.NRF_ERROR_RESOURCES, not available on nrf51
+
 func (e Error) Error() string {
 	switch {
 	case e >= C.NRF_ERROR_BASE_NUM && e < C.NRF_ERROR_SDM_BASE_NUM:
