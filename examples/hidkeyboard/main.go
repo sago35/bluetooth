@@ -68,6 +68,15 @@ var reportMap = []byte{
 
 var inputReport bluetooth.Characteristic
 
+// pendingReport holds the most recently computed input report, and
+// reportPending marks whether it still needs to be sent. Only the latest
+// state matters (each report is a full snapshot of pressed keys, not a
+// delta), so a newer report simply overwrites an older one that hasn't gone
+// out yet instead of queuing both: the host never needs to see superseded
+// intermediate states, only the final one.
+var pendingReport [8]byte
+var reportPending bool
+
 // button is a key switch between a GPIO pin and ground.
 type button struct {
 	pin     machine.Pin
@@ -239,23 +248,42 @@ func main() {
 		if b, err := machine.Serial.ReadByte(); err == nil {
 			typeKey(b)
 		}
+		flushPendingReport()
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// sendButtonReport sends a report with all currently pressed buttons, so that
-// pressing and releasing each button behaves like a real key (including key
-// repeat by the host and pressing multiple keys at once).
+// sendButtonReport computes a report with all currently pressed buttons, so
+// that pressing and releasing each button behaves like a real key (including
+// key repeat by the host and pressing multiple keys at once). It only stores
+// the report for flushPendingReport to send; it never blocks.
 func sendButtonReport() {
-	report := make([]byte, 8)
+	for i := range pendingReport {
+		pendingReport[i] = 0
+	}
 	n := 2 // key codes start at byte 2
 	for i := range buttons {
-		if buttons[i].pressed && n < len(report) {
-			_, report[n] = asciiToKeycode(buttons[i].char)
+		if buttons[i].pressed && n < len(pendingReport) {
+			_, pendingReport[n] = asciiToKeycode(buttons[i].char)
 			n++
 		}
 	}
-	inputReport.Write(report)
+	reportPending = true
+}
+
+// flushPendingReport sends the pending input report, if any. It never
+// blocks: if the SoftDevice notification queue is currently full, it leaves
+// reportPending set so the next call (one main loop tick later) tries again.
+// The queue drains on its own as connection events pass, so this converges
+// without the caller ever waiting on it.
+func flushPendingReport() {
+	if !reportPending {
+		return
+	}
+	_, err := inputReport.Write(pendingReport[:])
+	if err != bluetooth.ErrNotEnoughResources {
+		reportPending = false
+	}
 }
 
 // typeKey sends a key press and release for an ASCII character.
