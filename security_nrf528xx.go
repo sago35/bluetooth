@@ -100,6 +100,15 @@ var (
 	sysAttrLen volatile.Register16
 	peerBonded volatile.Register8
 
+	// secInfoKeyReplied is set when the security worker answered a SEC_INFO
+	// request with our bonded LTK, and consumed by secOnConnSecUpdate: only
+	// once the link actually encrypted is the central treated as the bond's
+	// owner (peerBonded). Setting peerBonded already at the reply would let
+	// a failed encryption attempt - e.g. a central bonded to another slot,
+	// whose LESC master ID is indistinguishable from ours - count as bonded
+	// and have its junk CCCD state saved over the active slot's.
+	secInfoKeyReplied volatile.Register8
+
 	// connPending is set while a central is connected but has not yet
 	// encrypted the link (by pairing or by resuming a bond). The security
 	// worker disconnects it if this takes longer than idleAuthTimeout, so a
@@ -298,11 +307,12 @@ func (a *Adapter) AllowNewPairing(allow bool) {
 	}
 }
 
-// RemoveBond deletes the stored bond, both the RAM copy and the flash
-// record, and disconnects the currently connected central (if any). The
-// previously bonded central can then no longer re-encrypt, and since no bond
-// remains, the next pairing attempt is accepted without AllowNewPairing.
-// This is the "unpair" action of a typical single-bond device.
+// RemoveBond deletes the bond stored in the active slot, both the RAM copy
+// and the flash record, and disconnects the currently connected central (if
+// any). The previously bonded central can then no longer re-encrypt. Bonds
+// in other slots are not affected. RemoveBond also opens the pairing window
+// (see AllowNewPairing): it is the "unpair" action that frees the active
+// slot for a new central.
 //
 // It must be called from goroutine context (it blocks until the flash erase
 // has completed), never from an interrupt.
@@ -328,6 +338,10 @@ func (a *Adapter) RemoveBond() error {
 			return err
 		}
 	}
+
+	// Unpairing means "make this slot available for a new central", so open
+	// the pairing window; it closes again as soon as a new bond is formed.
+	allowNewPairing.Set(1)
 
 	if !workerStarted {
 		// EnablePairing was never called, so the bond storage worker isn't
@@ -502,6 +516,7 @@ func secClearFlag(flag uint8) {
 
 func secOnConnect() {
 	peerBonded.Set(0)
+	secInfoKeyReplied.Set(0)
 }
 
 // secOnConnectPeripheral additionally starts the idle-auth disconnect timer
@@ -509,10 +524,25 @@ func secOnConnect() {
 // this must only be called for a connection where this device is the
 // peripheral, not for an outgoing central-role connection.
 func secOnConnectPeripheral(connHandle C.uint16_t) {
-	if pairingEnabled.Get() != 0 {
-		pendingConnHandle.Set(connHandle)
-		connPending.Set(1)
+	if pairingEnabled.Get() == 0 {
+		return
 	}
+	if bondSwitching.Get() != 0 ||
+		(bondValid.Get() == 0 && allowNewPairing.Get() == 0) {
+		// An empty active slot with the pairing window closed can serve
+		// nobody, but a central bonded to another slot may auto-reconnect
+		// to it: answering its SEC_INFO request with "no keys" would make
+		// it consider its own bond broken. Disconnect right away instead;
+		// the central keeps its bond and simply retries later. The same
+		// applies while SelectBondSlot is rearranging the bond state.
+		if debug {
+			println("disconnecting: no bond to serve on the active slot")
+		}
+		C.sd_ble_gap_disconnect(connHandle, C.BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION)
+		return
+	}
+	pendingConnHandle.Set(connHandle)
+	connPending.Set(1)
 }
 
 // secSaveSysAttrs saves the CCCD state of the bonded central so it can be
@@ -563,6 +593,14 @@ func secOnConnSecUpdate(connHandle C.uint16_t) {
 	// The link is now encrypted, one way or another: cancel the idle-auth
 	// disconnect timer.
 	connPending.Set(0)
+	if secInfoKeyReplied.Get() != 0 {
+		// The central re-encrypted successfully with our bonded LTK: it is
+		// the bond's owner (see secInfoKeyReplied for why this must not
+		// happen earlier). Pairing-based encryption sets peerBonded via
+		// AUTH_STATUS instead.
+		secInfoKeyReplied.Set(0)
+		peerBonded.Set(1)
+	}
 	secRestoreSysAttrs(connHandle)
 }
 
@@ -736,18 +774,33 @@ func securityWorker() {
 			secClearFlag(flagSecInfoRequest)
 			// A central that bonded with us before asks to encrypt the link
 			// with the LTK identified by the master ID (all zero for LESC).
-			// Without a matching key, reply that the keys are lost so the
-			// central can re-pair.
-			var encInfo *C.ble_gap_enc_info_t
 			if bondValid.Get() != 0 && secInfoEncReq.Get() != 0 &&
 				secInfoMasterID.ediv == ownEncKey.master_id.ediv &&
 				secInfoMasterID.rand == ownEncKey.master_id.rand {
-				encInfo = &ownEncKey.enc_info
-				peerBonded.Set(1)
-			}
-			errCode := C.sd_ble_gap_sec_info_reply(connHandle, encInfo, nil, nil)
-			if debug && errCode != 0 {
-				println("sec info reply failed:", errCode)
+				// peerBonded is only set once the encryption actually
+				// succeeds (see secInfoKeyReplied): under LESC the all-zero
+				// master ID also matches a central bonded to another slot,
+				// whose encryption attempt then fails with a MIC error - it
+				// disconnects and keeps its own bond intact.
+				secInfoKeyReplied.Set(1)
+				errCode := C.sd_ble_gap_sec_info_reply(connHandle, &ownEncKey.enc_info, nil, nil)
+				if debug && errCode != 0 {
+					println("sec info reply failed:", errCode)
+				}
+			} else {
+				// No key for this central on the active slot. It has a bond
+				// (a central without one pairs via a SEC_PARAMS request and
+				// never sends SEC_INFO), most likely with another slot - or
+				// with a slot that was just unpaired. Replying "keys lost"
+				// would make it discard its own copy of the bond, which must
+				// survive until its slot is active again: disconnect
+				// instead. A central whose bond really is gone (unpaired on
+				// this device) has to be removed on the central side too,
+				// after which it pairs anew via SEC_PARAMS.
+				if debug {
+					println("disconnecting: sec info request for a bond we don't hold")
+				}
+				C.sd_ble_gap_disconnect(connHandle, C.BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION)
 			}
 		}
 	}
