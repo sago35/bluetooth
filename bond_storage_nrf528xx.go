@@ -17,14 +17,21 @@ import (
 
 // Bond storage uses the last flash page of the application's flash area (as
 // reported by the linker, so it never collides with program code) to persist
-// the single bond this backend supports across resets: the LTK plus the
-// CCCD state (subscriptions) of the bonded central. A bonded central expects
-// both to survive a reset of this device, and does not necessarily subscribe
-// to notifications again on reconnection. The page is erased and rewritten
-// as a whole every time the bond changes.
+// the bond slots across resets: per slot, the LTK plus the CCCD state
+// (subscriptions) of the bonded central. A bonded central expects both to
+// survive a reset of this device, and does not necessarily subscribe to
+// notifications again on reconnection. The page is erased and rewritten as a
+// whole every time any slot changes.
+//
+// Page layout (all fields 4-byte aligned):
+//
+//	magic (uint32)
+//	BondSlotCount slot records of bondSlotRecordSize() bytes each:
+//	  valid (uint32, 1 = valid), encKey, sysAttrLen (uint32), sysAttr
 const (
 	bondFlashPageSize = 4096
-	bondFlashMagic    = 0xB0FFEE01 // arbitrary, just not the erased-flash value (0xFFFFFFFF)
+	bondFlashMagicV1  = 0xB0FFEE01 // previous single-bond layout, read for migration
+	bondFlashMagic    = 0xB0FFEE02 // arbitrary, just not the erased-flash value (0xFFFFFFFF)
 )
 
 var errFlashOpFailed = errors.New("bluetooth: flash operation failed")
@@ -33,37 +40,72 @@ func bondFlashAddr() uintptr {
 	return machine.FlashDataEnd() - bondFlashPageSize
 }
 
-// loadBondFromFlash restores a previously persisted bond, if any: the LTK (so
-// a bonded central can re-encrypt the link via a
+func bondSlotRecordSize() int {
+	encKeyLen := int(unsafe.Sizeof(ownEncKey))
+	return (4 + encKeyLen + 4 + len(sysAttrBuf) + 3) &^ 3
+}
+
+// readBondRecord fills a slot from the encKey/sysAttrLen/sysAttr sequence at
+// addr (the layout shared by a v2 slot record after its valid flag and the
+// single v1 record after its magic) and marks it valid.
+func readBondRecord(s *bondSlot, addr uintptr) {
+	encKeyLen := int(unsafe.Sizeof(s.encKey))
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&s.encKey)), encKeyLen), unsafe.Slice((*byte)(unsafe.Pointer(addr)), encKeyLen))
+	length := *(*uint32)(unsafe.Pointer(addr + uintptr(encKeyLen)))
+	copy(s.sysAttr[:], unsafe.Slice((*byte)(unsafe.Pointer(addr+uintptr(encKeyLen)+4)), len(s.sysAttr)))
+	if length <= uint32(len(s.sysAttr)) {
+		s.sysAttrLen = uint16(length)
+	}
+	s.valid = true
+}
+
+// loadBondFromFlash restores the persisted bond slots, if any: per slot the
+// LTK (so a bonded central can re-encrypt the link via a
 // BLE_GAP_EVT_SEC_INFO_REQUEST) and the CCCD state (so its notification
-// subscriptions still apply). It is called once, from EnablePairing, before
-// the device has any connection.
+// subscriptions still apply). The active slot is loaded into the live
+// single-bond state. It is called once, from EnablePairing, before the
+// device has any connection and before the workers start, so it may write
+// all bond state directly.
 func loadBondFromFlash() {
 	addr := bondFlashAddr()
-	magic := *(*uint32)(unsafe.Pointer(addr))
-	if magic != bondFlashMagic {
-		return
+	switch *(*uint32)(unsafe.Pointer(addr)) {
+	case bondFlashMagic:
+		recordSize := bondSlotRecordSize()
+		for i := range bondSlots {
+			slotAddr := addr + 4 + uintptr(i*recordSize)
+			if *(*uint32)(unsafe.Pointer(slotAddr)) == 1 {
+				readBondRecord(&bondSlots[i], slotAddr+4)
+			}
+		}
+	case bondFlashMagicV1:
+		// A record written by the previous single-bond layout: migrate it
+		// into slot 0. The page is rewritten in the new layout on the next
+		// save.
+		readBondRecord(&bondSlots[0], addr+4)
 	}
-	encKeyLen := int(unsafe.Sizeof(ownEncKey))
-	offset := addr + 4
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(&ownEncKey)), encKeyLen), unsafe.Slice((*byte)(unsafe.Pointer(offset)), encKeyLen))
-	offset += uintptr(encKeyLen)
 
-	length := *(*uint32)(unsafe.Pointer(offset))
-	offset += 4
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(&sysAttrBuf[0])), len(sysAttrBuf)), unsafe.Slice((*byte)(unsafe.Pointer(offset)), len(sysAttrBuf)))
+	loadStateFromSlot(int(activeBondSlot.Get()))
 
-	bondValid.Set(1)
-	if length <= uint32(len(sysAttrBuf)) {
-		sysAttrLen.Set(uint16(length))
+	// On a device with no bonds at all (typically fresh flash), pairing
+	// must work out of the box, without an explicit AllowNewPairing call.
+	if !anyBondSlotValid() {
+		allowNewPairing.Set(1)
 	}
 }
 
-// saveBondToFlash persists the current bond (the LTK in ownEncKey and the
-// CCCD state in sysAttrBuf) so it survives a reset. It must only be called
-// from the bond storage worker (not interrupt context) and blocks for the
-// duration of the flash operation (a few milliseconds).
+// saveBondToFlash persists all bond slots, after syncing the active slot
+// from the live single-bond state (the LTK in ownEncKey and the CCCD state
+// in sysAttrBuf). It must only be called from the bond storage worker (not
+// interrupt context) and blocks for the duration of the flash operations
+// (tens of milliseconds).
 func saveBondToFlash() error {
+	syncActiveSlotFromState()
+	return writeBondPage()
+}
+
+// writeBondPage erases the bond flash page and writes the slot cache back to
+// it. Worker context only, like saveBondToFlash.
+func writeBondPage() error {
 	addr := bondFlashAddr()
 
 	// Serialize with SDFlash operations: completion is reported through the
@@ -81,18 +123,23 @@ func saveBondToFlash() error {
 	}
 
 	encKeyLen := int(unsafe.Sizeof(ownEncKey))
-	recordLen := 4 + encKeyLen + 4 + len(sysAttrBuf)
-	buf := make([]byte, (recordLen+3)&^3) // magic, record, padded to a whole number of words
-	for i := recordLen; i < len(buf); i++ {
-		buf[i] = 0xff
-	}
+	recordSize := bondSlotRecordSize()
+	buf := make([]byte, 4+len(bondSlots)*recordSize)
 	*(*uint32)(unsafe.Pointer(&buf[0])) = bondFlashMagic
-	offset := 4
-	copy(buf[offset:offset+encKeyLen], unsafe.Slice((*byte)(unsafe.Pointer(&ownEncKey)), encKeyLen))
-	offset += encKeyLen
-	*(*uint32)(unsafe.Pointer(&buf[offset])) = uint32(sysAttrLen.Get())
-	offset += 4
-	copy(buf[offset:offset+len(sysAttrBuf)], unsafe.Slice((*byte)(unsafe.Pointer(&sysAttrBuf[0])), len(sysAttrBuf)))
+	for i := range bondSlots {
+		s := &bondSlots[i]
+		record := buf[4+i*recordSize:]
+		if !s.valid {
+			continue // the valid word stays 0
+		}
+		*(*uint32)(unsafe.Pointer(&record[0])) = 1
+		offset := 4
+		copy(record[offset:offset+encKeyLen], unsafe.Slice((*byte)(unsafe.Pointer(&s.encKey)), encKeyLen))
+		offset += encKeyLen
+		*(*uint32)(unsafe.Pointer(&record[offset])) = uint32(s.sysAttrLen)
+		offset += 4
+		copy(record[offset:offset+len(s.sysAttr)], s.sysAttr[:])
+	}
 
 	flashOpResult.Set(0)
 	errCode = C.sd_flash_write((*C.uint32_t)(unsafe.Pointer(addr)), (*C.uint32_t)(unsafe.Pointer(&buf[0])), C.uint32_t(len(buf)/4))
@@ -105,22 +152,31 @@ func saveBondToFlash() error {
 	return nil
 }
 
-// eraseBondFromFlash erases the persisted bond record. It must only be
-// called from the bond storage worker (see bondStorageWorker), so that flash
-// operations never run concurrently.
+// eraseBondFromFlash invalidates the active slot and rewrites the page;
+// bonds in other slots survive. It must only be called from the bond storage
+// worker (see bondStorageWorker), so that flash operations never run
+// concurrently, except before the workers exist (see RemoveBond).
 func eraseBondFromFlash() error {
-	flashOpMu.Lock()
-	defer flashOpMu.Unlock()
+	bondSlots[activeBondSlot.Get()] = bondSlot{}
+	return writeBondPage()
+}
 
-	flashOpResult.Set(0)
-	errCode := C.sd_flash_page_erase(C.uint32_t(uint32(bondFlashAddr()) / bondFlashPageSize))
-	if errCode != 0 {
-		return makeError(errCode)
+// performBondSwitch persists the outgoing active slot and loads slot n in
+// its place. It runs on the bond storage worker (or inline before the
+// workers exist), with no connection present - SelectBondSlot disconnected
+// and waited - so the live single-bond state cannot change concurrently.
+func performBondSwitch(n int) error {
+	if debug {
+		println("bond slot switch:", activeBondSlot.Get(), "->", n, "bonded:", bondSlots[n].valid)
 	}
-	if !waitFlashOp() {
-		return errFlashOpFailed
-	}
-	return nil
+	syncActiveSlotFromState()
+	// Everything the dirty flag stands for is persisted right here.
+	bondDirty.Set(0)
+	err := writeBondPage()
+	loadStateFromSlot(n)
+	activeBondSlot.Set(uint8(n))
+	peerBonded.Set(0)
+	return err
 }
 
 // Erase-request handshake between RemoveBond (application goroutine context)
@@ -143,6 +199,12 @@ var (
 // while a flash operation (up to tens of milliseconds) is in progress.
 func bondStorageWorker() {
 	for {
+		if bondSwitchRequested.Get() != 0 {
+			bondSwitchRequested.Set(0)
+			bondSwitchErr = performBondSwitch(int(bondSwitchTarget.Get()))
+			bondSwitchDone.Set(1)
+			continue
+		}
 		if bondEraseRequested.Get() != 0 {
 			bondEraseRequested.Set(0)
 			bondEraseErr = eraseBondFromFlash()

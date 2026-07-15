@@ -118,14 +118,98 @@ var (
 	sysAttrGetLen C.uint16_t
 )
 
+// BondSlotCount is the number of independent bond slots ("profiles") this
+// backend can persist. See SelectBondSlot.
+const BondSlotCount = 5
+
+// bondSlot is the RAM cache of one persisted bond slot. Only the active
+// slot is mirrored into the live single-bond state above (ownEncKey,
+// bondValid, sysAttrBuf/sysAttrLen): LESC master IDs are all zero, so a
+// SEC_INFO request cannot tell bonded peers apart, and without IRK support
+// neither can a connection. Keeping exactly one bond live at a time (like
+// ZMK profiles) sidesteps that: only the active slot's central can
+// re-encrypt; another slot's central that connects fails encryption and
+// disconnects, with its own copy of the bond intact.
+type bondSlot struct {
+	valid      bool
+	encKey     C.ble_gap_enc_key_t
+	sysAttrLen uint16
+	sysAttr    [64]byte
+}
+
+var (
+	bondSlots      [BondSlotCount]bondSlot
+	activeBondSlot volatile.Register8
+
+	// bondSwitching gates new connections while SelectBondSlot rearranges
+	// the bond state: advertising restarts as soon as the old central is
+	// disconnected, and a central connecting mid-switch could encrypt
+	// against the old slot's key and then have its CCCD state saved into
+	// the new slot.
+	bondSwitching volatile.Register8
+
+	// SelectBondSlot -> bond storage worker handshake, in the same style as
+	// the erase handshake in bond_storage_nrf528xx.go: bondSwitchErr is only
+	// valid once bondSwitchDone is set, and only one switch can be
+	// outstanding at a time (SelectBondSlot blocks until completion).
+	bondSwitchRequested volatile.Register8
+	bondSwitchTarget    volatile.Register8
+	bondSwitchDone      volatile.Register8
+	bondSwitchErr       error
+)
+
+var (
+	errInvalidBondSlot   = errors.New("bluetooth: invalid bond slot")
+	errBondSwitchTimeout = errors.New("bluetooth: bond slot switch: disconnect did not complete")
+)
+
+func anyBondSlotValid() bool {
+	for i := range bondSlots {
+		if bondSlots[i].valid {
+			return true
+		}
+	}
+	return false
+}
+
+// syncActiveSlotFromState copies the live single-bond state into the active
+// slot's cache entry, so that a subsequent page write persists it.
+func syncActiveSlotFromState() {
+	s := &bondSlots[activeBondSlot.Get()]
+	s.valid = bondValid.Get() != 0
+	s.encKey = ownEncKey
+	s.sysAttrLen = sysAttrLen.Get()
+	for i := range s.sysAttr {
+		s.sysAttr[i] = byte(sysAttrBuf[i])
+	}
+}
+
+// loadStateFromSlot loads a slot's cache entry into the live single-bond
+// state. The caller must make sure no connection is using that state.
+func loadStateFromSlot(n int) {
+	s := &bondSlots[n]
+	ownEncKey = s.encKey
+	for i := range sysAttrBuf {
+		sysAttrBuf[i] = C.uint8_t(s.sysAttr[i])
+	}
+	sysAttrLen.Set(s.sysAttrLen)
+	if s.valid {
+		bondValid.Set(1)
+	} else {
+		bondValid.Set(0)
+	}
+}
+
 // EnablePairing configures the adapter to accept pairing and bonding requests
 // from a connected central. It must be called after Enable() and before a
 // central connects. Without it, incoming pairing requests are rejected with
 // "pairing not supported".
 //
-// The bond is persisted to flash, so a bonded central can re-encrypt the link
+// Bonds are persisted to flash, so a bonded central can re-encrypt the link
 // on reconnection without pairing again, even after a reset of this device.
-// Only a single bond is kept: pairing with a new central overwrites it.
+// Up to BondSlotCount bonds are kept, one per slot, but only the active
+// slot's bond is live at any time (see SelectBondSlot); pairing with a new
+// central overwrites the active slot.
 func (a *Adapter) EnablePairing(params PairingParams) error {
 	// Always set BLE_GAP_OPT_PASSKEY, even when StaticPasskey is empty:
 	// passing a NULL p_passkey tells the SoftDevice to go back to generating a
@@ -258,6 +342,79 @@ func (a *Adapter) RemoveBond() error {
 		time.Sleep(time.Millisecond)
 	}
 	return bondEraseErr
+}
+
+// SelectBondSlot switches the active bond slot ("profile", 0 to
+// BondSlotCount-1). Each slot holds an independent bond, but only the active
+// one is live: its central can reconnect and re-encrypt, while a central
+// bonded to another slot fails encryption and disconnects (keeping its own
+// bond record intact, so it works again when its slot becomes active).
+// The currently connected central, if any, is disconnected first.
+//
+// Pairing a new central into an empty slot requires opening the pairing
+// window first: RemoveBond does, and so does AllowNewPairing(true).
+//
+// The active slot number itself is not persisted; the application selects
+// the slot it wants at startup. Called before EnablePairing, this only picks
+// the slot that EnablePairing will load from flash. Called after, it must
+// run in goroutine context: it blocks until the switch completed, including
+// waiting out the disconnect (up to a few seconds).
+func (a *Adapter) SelectBondSlot(n int) error {
+	if n < 0 || n >= BondSlotCount {
+		return errInvalidBondSlot
+	}
+	if int(activeBondSlot.Get()) == n {
+		return nil
+	}
+	if !workerStarted {
+		// EnablePairing has not run yet: the slots are not loaded and there
+		// is nothing live to swap out, so just pick the slot for
+		// loadBondFromFlash to activate later. Writing flash here would
+		// wipe the stored bonds with the empty RAM cache.
+		activeBondSlot.Set(uint8(n))
+		return nil
+	}
+
+	// Keep new connections away while the bond state is inconsistent (see
+	// bondSwitching): advertising resumes right after the disconnect below.
+	bondSwitching.Set(1)
+	defer bondSwitching.Set(0)
+
+	// Disconnect the current central and wait for the disconnect to
+	// complete: the DISCONNECTED handler saves the connection's CCCD state
+	// into the still-active old slot. Swapping before it ran would leak the
+	// old central's CCCD state into the new slot.
+	if connHandle := currentConnection.Get(); connHandle != C.BLE_CONN_HANDLE_INVALID {
+		// The result is not checked on purpose: the connection may be going
+		// away on its own right now, and the wait below covers every case.
+		C.sd_ble_gap_disconnect(connHandle, C.BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION)
+		ok := false
+		for i := 0; i < 3000; i++ { // supervision timeouts run in seconds
+			if currentConnection.Get() == C.BLE_CONN_HANDLE_INVALID {
+				ok = true
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if !ok {
+			return errBondSwitchTimeout
+		}
+	}
+
+	// Hand the actual switch to the bond storage worker, which owns all
+	// bond flash operations and the slot cache.
+	bondSwitchDone.Set(0)
+	bondSwitchTarget.Set(uint8(n))
+	bondSwitchRequested.Set(1)
+	for bondSwitchDone.Get() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	return bondSwitchErr
+}
+
+// BondSlot returns the active bond slot selected with SelectBondSlot.
+func (a *Adapter) BondSlot() int {
+	return int(activeBondSlot.Get())
 }
 
 // RequestPairing sends a security request to the connected central, asking it
