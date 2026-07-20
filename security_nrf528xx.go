@@ -309,6 +309,17 @@ func (a *Adapter) AllowNewPairing(allow bool) {
 // It must be called from goroutine context (it blocks until the flash erase
 // has completed), never from an interrupt.
 func (a *Adapter) RemoveBond() error {
+	// A SelectBondSlot call may still be in flight on another goroutine (it
+	// blocks for up to a few seconds waiting out a disconnect). Removing the
+	// bond mid-switch would erase whatever slot is active at that moment -
+	// the one being switched away from - so wait for the switch to settle.
+	// This only covers a switch that already set bondSwitching; ordering an
+	// unpair after a switch that has not started yet is the caller's job
+	// (tinygo-keyboard funnels both through one worker goroutine).
+	for bondSwitching.Get() != 0 {
+		time.Sleep(time.Millisecond)
+	}
+
 	bondValid.Set(0)
 	// peerBonded must be cleared too: sd_ble_gap_disconnect below is
 	// asynchronous, so the actual disconnect event can still arrive after
