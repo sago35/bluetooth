@@ -84,11 +84,13 @@ var (
 	bondValid volatile.Register8
 
 	// allowNewPairing gates pairing with a central this device does not
-	// already have a bond with. It defaults to closed (0) once a bond
-	// exists, so a nearby device cannot silently take over an already-paired
-	// keyboard; the application must call Adapter.AllowNewPairing(true),
-	// typically guarded by a physical action such as a boot-time button
-	// combination. It is reset to closed again after a new bond is formed.
+	// already have a bond with. It is closed (0) while the active slot
+	// holds a bond, so a nearby device cannot silently take over an
+	// already-paired keyboard, and opens automatically whenever the active
+	// slot is empty (on load and on SelectBondSlot: selecting an empty
+	// slot, like unpairing, is the explicit "pair a new device" action).
+	// It closes again as soon as a new bond is formed. The application can
+	// override it at any time with Adapter.AllowNewPairing.
 	allowNewPairing volatile.Register8
 
 	// System attributes (CCCD values) of the bonded central, saved at
@@ -171,15 +173,6 @@ var (
 	errInvalidBondSlot   = errors.New("bluetooth: invalid bond slot")
 	errBondSwitchTimeout = errors.New("bluetooth: bond slot switch: disconnect did not complete")
 )
-
-func anyBondSlotValid() bool {
-	for i := range bondSlots {
-		if bondSlots[i].valid {
-			return true
-		}
-	}
-	return false
-}
 
 // syncActiveSlotFromState copies the live single-bond state into the active
 // slot's cache entry, so that a subsequent page write persists it.
@@ -291,14 +284,13 @@ func (a *Adapter) EnablePairing(params PairingParams) error {
 }
 
 // AllowNewPairing opens or closes the pairing window for a central this
-// device does not already have a bond with. As long as no bond exists yet,
-// pairing is always allowed and this setting has no effect. Once a bond
-// exists, new pairing attempts are rejected by default (so a nearby device
-// cannot silently take over an already-paired keyboard) until this is called
-// with true; the window closes again as soon as a new bond is formed.
-//
-// Typical usage is to gate this behind a physical action, such as a
-// particular combination of buttons held at startup.
+// device does not already have a bond with. The window is managed
+// automatically - open while the active slot is empty (including right
+// after RemoveBond or after selecting an empty slot), closed as soon as a
+// bond is formed - so most applications never need to call this. Call it to
+// override that default, e.g. to let a new central take over a bonded slot
+// without unpairing first, typically gated behind a physical action such as
+// a particular combination of buttons held at startup.
 func (a *Adapter) AllowNewPairing(allow bool) {
 	if allow {
 		allowNewPairing.Set(1)
@@ -365,8 +357,9 @@ func (a *Adapter) RemoveBond() error {
 // bond record intact, so it works again when its slot becomes active).
 // The currently connected central, if any, is disconnected first.
 //
-// Pairing a new central into an empty slot requires opening the pairing
-// window first: RemoveBond does, and so does AllowNewPairing(true).
+// Selecting an empty slot opens the pairing window, so a new central can
+// pair into it right away; selecting a bonded slot closes the window (see
+// allowNewPairing).
 //
 // The active slot number itself is not persisted; the application selects
 // the slot it wants at startup. Called before EnablePairing, this only picks

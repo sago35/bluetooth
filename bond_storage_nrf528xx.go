@@ -86,9 +86,11 @@ func loadBondFromFlash() {
 
 	loadStateFromSlot(int(activeBondSlot.Get()))
 
-	// On a device with no bonds at all (typically fresh flash), pairing
-	// must work out of the box, without an explicit AllowNewPairing call.
-	if !anyBondSlotValid() {
+	// An empty active slot must accept pairing out of the box (fresh flash,
+	// or the device restarted while an unused slot was selected): with the
+	// window closed it could serve nobody. Bonded slots stay protected: the
+	// window closes as soon as a bond is formed.
+	if !bondSlots[activeBondSlot.Get()].valid {
 		allowNewPairing.Set(1)
 	}
 }
@@ -176,6 +178,16 @@ func performBondSwitch(n int) error {
 	loadStateFromSlot(n)
 	activeBondSlot.Set(uint8(n))
 	peerBonded.Set(0)
+	// Selecting an empty slot is the explicit "pair a new device here"
+	// action (profiles behave like ZMK's), so open the pairing window: the
+	// new central can pair right away, without a separate unpair step.
+	// Selecting a bonded slot closes the window again so a nearby device
+	// cannot silently take over that bond.
+	if bondSlots[n].valid {
+		allowNewPairing.Set(0)
+	} else {
+		allowNewPairing.Set(1)
+	}
 	return err
 }
 
