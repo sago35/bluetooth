@@ -2,7 +2,8 @@
 // currently supported on Nordic SoftDevices only.
 //
 // Just Works encrypts the link with no user interaction, but gives no
-// protection against a man-in-the-middle: any nearby device can pair.
+// protection against a man-in-the-middle: any nearby device can pair -
+// though only until one does, see below.
 //
 // It advertises as a keyboard accessory (HID over GATT, appearance 961) but
 // never actually sends a key - see examples/hidkeyboard for a functional
@@ -16,12 +17,15 @@
 // Bluetooth settings on most platforms, no extra app required.
 //
 // The bond survives a reset of this device: the central can reconnect and
-// re-encrypt the link without pairing again. If pairing ever gets into a bad
-// state (for example the central was deleted from its own Bluetooth
-// settings but this device still thinks it is bonded), delete the device
-// from the central's Bluetooth settings and send 'r' on this device's serial
-// console to remove the bond here too - both sides need to forget each
-// other for a clean re-pair.
+// re-encrypt the link without pairing again. While the bond exists, pairing
+// attempts from any other central are rejected, so a nearby device cannot
+// take over an already-paired device; remove the bond first (or open the
+// pairing window with AllowNewPairing) to pair with a new central. If
+// pairing ever gets into a bad state (for example the central was deleted
+// from its own Bluetooth settings but this device still thinks it is
+// bonded), delete the device from the central's Bluetooth settings and send
+// 'r' on this device's serial console to remove the bond here too - both
+// sides need to forget each other for a clean re-pair.
 //
 // See examples/pairing-passkey for a pairing method with
 // man-in-the-middle protection.
