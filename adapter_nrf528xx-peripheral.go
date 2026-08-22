@@ -50,6 +50,9 @@ func handleEvent() {
 				// because it would need to be reconfigured as a non-connectable
 				// advertisement. That's left as a future addition, if
 				// necessary.
+				// The bond state may have changed while connected (new bond,
+				// unpair), so re-derive the advertising filter first.
+				defaultAdvertisement.applyIdentityFilter()
 				C.sd_ble_gap_adv_start(defaultAdvertisement.handle, C.BLE_CONN_CFG_TAG_DEFAULT)
 			}
 			device := Device{

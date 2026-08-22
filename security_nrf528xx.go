@@ -331,6 +331,9 @@ func (a *Adapter) AllowNewPairing(allow bool) {
 	} else {
 		allowNewPairing.Set(0)
 	}
+	// An open pairing window must advertise openly, or the new central
+	// could never connect; a closing one restores the bonded-only filter.
+	reapplyAdvFilter()
 }
 
 // RemoveBond deletes the bond stored in the active slot, both the RAM copy
@@ -381,6 +384,12 @@ func (a *Adapter) RemoveBond() error {
 	// Unpairing means "make this slot available for a new central", so open
 	// the pairing window; it closes again as soon as a new bond is formed.
 	allowNewPairing.Set(1)
+
+	// Without a connection there is no disconnect to restart advertising:
+	// open up a running whitelist-filtered advertisement here, or the new
+	// central could never connect. (With a connection, the auto-restart
+	// after the disconnect above re-derives the filter.)
+	reapplyAdvFilter()
 
 	if !workerStarted {
 		// EnablePairing was never called, so the bond storage worker isn't
@@ -463,6 +472,10 @@ func (a *Adapter) SelectBondSlot(n int) error {
 	for bondSwitchDone.Get() == 0 {
 		time.Sleep(time.Millisecond)
 	}
+
+	// The advertising restarted by the disconnect above still filters for
+	// the old slot's central; switch it over to the new slot's.
+	reapplyAdvFilter()
 	return bondSwitchErr
 }
 
