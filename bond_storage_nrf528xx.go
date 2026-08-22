@@ -27,11 +27,13 @@ import (
 //
 //	magic (uint32)
 //	BondSlotCount slot records of bondSlotRecordSize() bytes each:
-//	  valid (uint32, 1 = valid), encKey, sysAttrLen (uint32), sysAttr
+//	  valid (uint32, 1 = valid), encKey, idValid (uint32), idKey,
+//	  sysAttrLen (uint32), sysAttr
 const (
 	bondFlashPageSize = 4096
-	bondFlashMagicV1  = 0xB0FFEE01 // previous single-bond layout, read for migration
-	bondFlashMagic    = 0xB0FFEE02 // arbitrary, just not the erased-flash value (0xFFFFFFFF)
+	bondFlashMagicV1  = 0xB0FFEE01 // single-bond layout, read for migration
+	bondFlashMagicV2  = 0xB0FFEE02 // five slots without identity keys, read for migration
+	bondFlashMagic    = 0xB0FFEE03 // arbitrary, just not the erased-flash value (0xFFFFFFFF)
 )
 
 var errFlashOpFailed = errors.New("bluetooth: flash operation failed")
@@ -40,15 +42,47 @@ func bondFlashAddr() uintptr {
 	return machine.FlashDataEnd() - bondFlashPageSize
 }
 
-func bondSlotRecordSize() int {
-	encKeyLen := int(unsafe.Sizeof(ownEncKey))
-	return (4 + encKeyLen + 4 + len(sysAttrBuf) + 3) &^ 3
+// bondEncKeyLen and bondIDKeyLen are the stored (4-byte padded) sizes of the
+// two key structures, so every uint32 field of a record stays aligned.
+func bondEncKeyLen() int {
+	return (int(unsafe.Sizeof(ownEncKey)) + 3) &^ 3
 }
 
-// readBondRecord fills a slot from the encKey/sysAttrLen/sysAttr sequence at
-// addr (the layout shared by a v2 slot record after its valid flag and the
-// single v1 record after its magic) and marks it valid.
+func bondIDKeyLen() int {
+	return (int(unsafe.Sizeof(bondPeerID)) + 3) &^ 3
+}
+
+func bondSlotRecordSize() int {
+	return 4 + bondEncKeyLen() + 4 + bondIDKeyLen() + 4 + ((len(sysAttrBuf) + 3) &^ 3)
+}
+
+func bondSlotRecordSizeV2() int {
+	return (4 + int(unsafe.Sizeof(ownEncKey)) + 4 + len(sysAttrBuf) + 3) &^ 3
+}
+
+// readBondRecord fills a slot from the record at addr (past its valid flag):
+// encKey, idValid, idKey, sysAttrLen, sysAttr. It marks the slot valid.
 func readBondRecord(s *bondSlot, addr uintptr) {
+	rawEncLen := int(unsafe.Sizeof(s.encKey))
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&s.encKey)), rawEncLen), unsafe.Slice((*byte)(unsafe.Pointer(addr)), rawEncLen))
+	addr += uintptr(bondEncKeyLen())
+	s.idValid = *(*uint32)(unsafe.Pointer(addr)) == 1
+	addr += 4
+	rawIDLen := int(unsafe.Sizeof(s.idKey))
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&s.idKey)), rawIDLen), unsafe.Slice((*byte)(unsafe.Pointer(addr)), rawIDLen))
+	addr += uintptr(bondIDKeyLen())
+	length := *(*uint32)(unsafe.Pointer(addr))
+	copy(s.sysAttr[:], unsafe.Slice((*byte)(unsafe.Pointer(addr+4)), len(s.sysAttr)))
+	if length <= uint32(len(s.sysAttr)) {
+		s.sysAttrLen = uint16(length)
+	}
+	s.valid = true
+}
+
+// readBondRecordLegacy fills a slot from the identity-less
+// encKey/sysAttrLen/sysAttr sequence shared by a v2 slot record (after its
+// valid flag) and the single v1 record (after its magic), and marks it valid.
+func readBondRecordLegacy(s *bondSlot, addr uintptr) {
 	encKeyLen := int(unsafe.Sizeof(s.encKey))
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(&s.encKey)), encKeyLen), unsafe.Slice((*byte)(unsafe.Pointer(addr)), encKeyLen))
 	length := *(*uint32)(unsafe.Pointer(addr + uintptr(encKeyLen)))
@@ -77,11 +111,22 @@ func loadBondFromFlash() {
 				readBondRecord(&bondSlots[i], slotAddr+4)
 			}
 		}
-	case bondFlashMagicV1:
-		// A record written by the previous single-bond layout: migrate it
-		// into slot 0. The page is rewritten in the new layout on the next
+	case bondFlashMagicV2:
+		// Slot records written before identity keys existed: migrate them
+		// without one (their advertising stays unfiltered until the central
+		// pairs again). The page is rewritten in the new layout on the next
 		// save.
-		readBondRecord(&bondSlots[0], addr+4)
+		recordSize := bondSlotRecordSizeV2()
+		for i := range bondSlots {
+			slotAddr := addr + 4 + uintptr(i*recordSize)
+			if *(*uint32)(unsafe.Pointer(slotAddr)) == 1 {
+				readBondRecordLegacy(&bondSlots[i], slotAddr+4)
+			}
+		}
+	case bondFlashMagicV1:
+		// A record written by the old single-bond layout: migrate it into
+		// slot 0, also without an identity key.
+		readBondRecordLegacy(&bondSlots[0], addr+4)
 	}
 
 	loadStateFromSlot(int(activeBondSlot.Get()))
@@ -124,7 +169,6 @@ func writeBondPage() error {
 		return errFlashOpFailed
 	}
 
-	encKeyLen := int(unsafe.Sizeof(ownEncKey))
 	recordSize := bondSlotRecordSize()
 	buf := make([]byte, 4+len(bondSlots)*recordSize)
 	*(*uint32)(unsafe.Pointer(&buf[0])) = bondFlashMagic
@@ -136,8 +180,16 @@ func writeBondPage() error {
 		}
 		*(*uint32)(unsafe.Pointer(&record[0])) = 1
 		offset := 4
-		copy(record[offset:offset+encKeyLen], unsafe.Slice((*byte)(unsafe.Pointer(&s.encKey)), encKeyLen))
-		offset += encKeyLen
+		rawEncLen := int(unsafe.Sizeof(s.encKey))
+		copy(record[offset:offset+rawEncLen], unsafe.Slice((*byte)(unsafe.Pointer(&s.encKey)), rawEncLen))
+		offset += bondEncKeyLen()
+		if s.idValid {
+			*(*uint32)(unsafe.Pointer(&record[offset])) = 1
+		}
+		offset += 4
+		rawIDLen := int(unsafe.Sizeof(s.idKey))
+		copy(record[offset:offset+rawIDLen], unsafe.Slice((*byte)(unsafe.Pointer(&s.idKey)), rawIDLen))
+		offset += bondIDKeyLen()
 		*(*uint32)(unsafe.Pointer(&record[offset])) = uint32(s.sysAttrLen)
 		offset += 4
 		copy(record[offset:offset+len(s.sysAttr)], s.sysAttr[:])

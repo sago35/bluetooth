@@ -51,6 +51,7 @@ var (
 	secKeyset      C.ble_gap_sec_keyset_t
 	ownPubkey      C.ble_gap_lesc_p256_pk_t // our LESC public key, in SMP format
 	peerPubkey     C.ble_gap_lesc_p256_pk_t // the SoftDevice stores the peer key here
+	peerIDKey      C.ble_gap_id_key_t       // the peer identity key, stored here during pairing
 	lescDHKey      C.ble_gap_lesc_dhkey_t
 	lescPrivateKey *ecdh.PrivateKey
 	staticPasskey  [6]C.uint8_t
@@ -69,9 +70,13 @@ var (
 	// authStatusBonded: legacy pairing can bond too, and the CONN_SEC_UPDATE
 	// security level alone doesn't distinguish LESC Just Works (level 2)
 	// from legacy Just Works (also level 2). Only used for the debug log.
-	authStatusLESC  volatile.Register8
-	secInfoMasterID C.ble_gap_master_id_t
-	secInfoEncReq   volatile.Register8
+	authStatusLESC volatile.Register8
+	// authStatusPeerID reports whether the peer distributed its identity
+	// key (IRK + identity address) during the pairing procedure, i.e.
+	// whether peerIDKey holds usable data.
+	authStatusPeerID volatile.Register8
+	secInfoMasterID  C.ble_gap_master_id_t
+	secInfoEncReq    volatile.Register8
 
 	// The LTK from the last bonding procedure, persisted to flash (see
 	// bond_storage_nrf528xx.go). bondValid reports whether it is populated.
@@ -101,6 +106,19 @@ var (
 	sysAttrBuf [64]C.uint8_t
 	sysAttrLen volatile.Register16
 	peerBonded volatile.Register8
+
+	// The identity key (IRK + identity address) the bonded central
+	// distributed during pairing, part of the persisted bond. It lets
+	// advertising be filtered down to just that central (see
+	// applyIdentityFilter): the SoftDevice resolves the central's
+	// resolvable private addresses against the IRK, so a central bonded
+	// to another slot never even connects (instead of connecting, failing
+	// encryption with a MIC error, disconnecting and retrying - which both
+	// keeps the single connection slot busy and teaches some hosts to
+	// back off from reconnecting at all). Not every central distributes
+	// an identity key; without one, advertising stays open as before.
+	bondPeerID      C.ble_gap_id_key_t
+	bondPeerIDValid volatile.Register8
 
 	// secInfoKeyReplied is set when the security worker answered a SEC_INFO
 	// request with our bonded LTK, and consumed by secOnConnSecUpdate: only
@@ -144,6 +162,8 @@ const BondSlotCount = 5
 type bondSlot struct {
 	valid      bool
 	encKey     C.ble_gap_enc_key_t
+	idValid    bool
+	idKey      C.ble_gap_id_key_t
 	sysAttrLen uint16
 	sysAttr    [64]byte
 }
@@ -180,6 +200,8 @@ func syncActiveSlotFromState() {
 	s := &bondSlots[activeBondSlot.Get()]
 	s.valid = bondValid.Get() != 0
 	s.encKey = ownEncKey
+	s.idValid = bondPeerIDValid.Get() != 0
+	s.idKey = bondPeerID
 	s.sysAttrLen = sysAttrLen.Get()
 	for i := range s.sysAttr {
 		s.sysAttr[i] = byte(sysAttrBuf[i])
@@ -191,6 +213,12 @@ func syncActiveSlotFromState() {
 func loadStateFromSlot(n int) {
 	s := &bondSlots[n]
 	ownEncKey = s.encKey
+	bondPeerID = s.idKey
+	if s.idValid {
+		bondPeerIDValid.Set(1)
+	} else {
+		bondPeerIDValid.Set(0)
+	}
 	for i := range sysAttrBuf {
 		sysAttrBuf[i] = C.uint8_t(s.sysAttr[i])
 	}
@@ -242,6 +270,11 @@ func (a *Adapter) EnablePairing(params PairingParams) error {
 	// complete their pairing flow without a bond.
 	secParamsReply.set_bitfield_bond(1)
 	secParamsReply.kdist_own.set_bitfield_enc(1)
+	// Ask the central to distribute its identity key (IRK + identity
+	// address) too, so advertising can be filtered down to the bonded
+	// central (see bondPeerID). Centrals that don't support it simply
+	// leave the id bit unset in AUTH_STATUS.
+	secParamsReply.kdist_peer.set_bitfield_id(1)
 	if params.MITM {
 		secParamsReply.set_bitfield_mitm(1)
 	}
@@ -260,6 +293,7 @@ func (a *Adapter) EnablePairing(params PairingParams) error {
 	secKeyset.keys_own.p_enc_key = &ownEncKey
 	secKeyset.keys_own.p_pk = &ownPubkey
 	secKeyset.keys_peer.p_pk = &peerPubkey
+	secKeyset.keys_peer.p_id_key = &peerIDKey
 
 	if params.LESC {
 		if err := lescGenerateKeypair(); err != nil {
@@ -331,6 +365,8 @@ func (a *Adapter) RemoveBond() error {
 	bondDirty.Set(0)
 	sysAttrLen.Set(0)
 	ownEncKey = C.ble_gap_enc_key_t{}
+	bondPeerIDValid.Set(0)
+	bondPeerID = C.ble_gap_id_key_t{}
 	for i := range sysAttrBuf {
 		sysAttrBuf[i] = 0
 	}
@@ -681,6 +717,7 @@ func secOnAuthStatus(connHandle C.uint16_t, evt *C.ble_gap_evt_auth_status_t) {
 	authStatusCode.Set(uint8(evt.auth_status))
 	authStatusBonded.Set(uint8(evt.bitfield_bonded()))
 	authStatusLESC.Set(uint8(evt.bitfield_lesc()))
+	authStatusPeerID.Set(uint8(evt.kdist_peer.bitfield_id()))
 	secEventConn.Set(connHandle)
 	secSetFlag(flagAuthStatus)
 }
@@ -761,6 +798,18 @@ func securityWorker() {
 			if err == nil && authStatusBonded.Get() != 0 {
 				bondValid.Set(1)
 				peerBonded.Set(1)
+				// The peer identity key belongs to the new bond; a peer
+				// that didn't distribute one leaves the slot unfiltered.
+				if authStatusPeerID.Get() != 0 {
+					bondPeerID = peerIDKey
+					bondPeerIDValid.Set(1)
+				} else {
+					bondPeerID = C.ble_gap_id_key_t{}
+					bondPeerIDValid.Set(0)
+				}
+				if debug {
+					println("peer identity key received:", authStatusPeerID.Get() != 0)
+				}
 				// A new bond invalidates CCCD state saved for an old one.
 				sysAttrLen.Set(0)
 				bondDirty.Set(1)
